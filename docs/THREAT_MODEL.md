@@ -34,9 +34,27 @@ theft, not just "the monitor shows a wrong result."
    time) while still sending the correct `Host`/SNI for TLS — this is what prevents
    DNS rebinding between the validation step and the actual connection (the classic
    TOCTOU gap: hostname resolves to a public IP during validation, then to a private
-   IP a moment later at connect time). This is the single control most likely to be
-   implemented subtly wrong, so Phase 3 includes a dedicated rebinding test using a
-   DNS server that changes its answer between the two lookups.
+   IP a moment later at connect time).
+   **Status: implemented and tested (Phase 3, 2026-10-09).** Built via Node's
+   `lookup` option on `http(s).request`/`tls.connect` — our own resolver is called
+   exactly once per hop and its result is pinned directly into the socket connect
+   step, so there is structurally only one resolution, not a validate-then-reconnect
+   pair. Proven with a dependency-injected resolver (not a live DNS server) that
+   would answer differently on a second call; the tests assert the resolver is
+   called exactly once and that the pinned connection uses that first answer
+   (`packages/safe-fetch/test/dnsResolution.test.ts`,
+   `packages/safe-fetch/test/safeFetch.test.ts`). Two non-obvious findings from
+   building this, in case they look removable later: Node's Happy-Eyeballs
+   dual-stack logic (`autoSelectFamily`, on by default) must be explicitly disabled
+   on every pinned connection, or Node intermittently calls our single-address
+   `lookup` expecting the multi-address array form once a connection runs past its
+   internal fallback timer — confirmed directly, it only showed up on slow/TLS
+   connections, not fast local ones. And IPv6 address classification needs an
+   explicit allowlist of the allocated `2000::/3` global-unicast block on top of
+   `ipaddr.js`'s special-range blocklist, because a syntactically valid address
+   like `0:0:ffff:ffff:ffff:ffff:ffff:ffff` matches none of its named special
+   ranges yet was never allocated for internet routing either — see
+   `packages/safe-fetch/src/ipClassification.ts`.
 8. Bound total request time, response body size (read with a hard cap, not just a
    `Content-Length` check — a server can lie about or omit that header), and
    decompression ratio (zip-bomb-style compressed responses).

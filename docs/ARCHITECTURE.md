@@ -9,7 +9,7 @@ something already running. Versions below were checked against the npm registry 
 | Concern | Choice | Version checked 2026-10-09 | Notes |
 |---|---|---|---|
 | Framework | Next.js (App Router) | 16.4.0 | Requires Node >=20.9 |
-| Language | TypeScript, strict mode | 7.0.2 | Current stable (native/Go-ported compiler line); not a beta tag |
+| Language | TypeScript, strict mode | 6.0.3 | **Not** the newest `latest` tag (7.0.2, the native/Go-ported compiler line) — pinned to the last 6.x release because `typescript-eslint@8.71.1` (needed for type-aware lint rules) declares a peer range of `>=4.8.4 <6.1.0` and does not yet support the TS7 compiler line. Confirmed by an actual failed `npm install` during Phase 2, not by inspection. Revisit once typescript-eslint publishes TS7 support. |
 | UI | React / React DOM | 19.3.0 | |
 | Styling | Tailwind CSS | 4.3.3 | + shadcn/ui components (copied in, not a pinned runtime dep) |
 | shadcn CLI | `shadcn` | 4.21.4 | dev-time only |
