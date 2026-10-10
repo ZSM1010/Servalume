@@ -1,25 +1,7 @@
-import { readFile, readdir } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
+import { applyMigrations } from "./applyMigrations.js";
 import { applySupabaseShim } from "./supabaseShim.js";
-
-const migrationsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "migrations");
-
-async function applyMigrations(db: PGlite): Promise<void> {
-  const files = (await readdir(migrationsDir)).filter((f) => f.endsWith(".sql")).sort();
-  for (const file of files) {
-    const sql = await readFile(path.join(migrationsDir, file), "utf8");
-    try {
-      await db.exec(sql);
-    } catch (err) {
-      throw new Error(`Migration ${file} failed: ${err instanceof Error ? err.message : String(err)}`, {
-        cause: err,
-      });
-    }
-  }
-}
 
 /** A fresh, fully-migrated database for one test. PGlite gives us a real, isolated Postgres instance per call — no shared state between tests. */
 export async function createTestDb(): Promise<PGlite> {

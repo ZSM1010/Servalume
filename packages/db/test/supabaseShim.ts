@@ -1,22 +1,37 @@
-import type { PGlite } from "@electric-sql/pglite";
+/**
+ * Minimal structural interface both `@electric-sql/pglite`'s `PGlite` and
+ * node-postgres's `Client`/`Pool` already satisfy, so this entire shim works
+ * unmodified against either — PGlite for packages/db's single-connection
+ * tests, and a real embedded Postgres (apps/worker's tests, where genuine
+ * multi-connection concurrency matters, e.g. for pg-boss's SKIP LOCKED job
+ * claiming) via a thin adapter that maps `exec` to the same `query` call
+ * node-postgres's simple query protocol already runs multi-statement SQL
+ * through.
+ */
+export interface SqlExecutor {
+  query<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<{ rows: T[] }>;
+  exec(sql: string): Promise<unknown>;
+}
 
 /**
  * Our migrations target a real Supabase project, which already provides the
  * `auth` schema, `auth.uid()`, and the anon/authenticated/service_role roles
  * before any of our migrations ever run (see migrations/0001's header
- * comment). Local/CI testing against plain Postgres (via PGlite) has none of
- * that, so this shim creates faithful stand-ins — close enough that the exact
- * same migration SQL that will run against Supabase also runs here unmodified.
+ * comment). Local/CI testing against plain Postgres has none of that, so
+ * this shim creates faithful stand-ins — close enough that the exact same
+ * migration SQL that will run against Supabase also runs here unmodified.
  *
  * This file is test-only. It must never be applied to a real Supabase
  * project, which already has the real versions of everything it creates.
  *
- * All helpers here assume one PGlite connection used sequentially — switch
- * role/user, run queries, switch back — never concurrently from multiple
- * callers at once. That matches how these tests use it and keeps the
- * role/session-variable juggling below simple and safe.
+ * The role/session-variable helpers below (`asAuthenticatedUser` etc.) assume
+ * one connection used sequentially — switch role/user, run queries, switch
+ * back — never concurrently from multiple callers sharing the same
+ * SqlExecutor at once. That matches how packages/db's tests use it. Code
+ * that needs real concurrency (e.g. apps/worker testing pg-boss) should open
+ * a separate connection per concurrent actor instead of sharing one.
  */
-export async function applySupabaseShim(db: PGlite): Promise<void> {
+export async function applySupabaseShim(db: SqlExecutor): Promise<void> {
   await db.exec(`
     create schema if not exists auth;
 
@@ -80,7 +95,7 @@ export async function applySupabaseShim(db: PGlite): Promise<void> {
  * sequential (never concurrent — see the module comment), so a session-level
  * setting is safe here and is reset explicitly after each use.
  */
-export async function setCurrentTestUser(db: PGlite, userId: string | null): Promise<void> {
+export async function setCurrentTestUser(db: SqlExecutor, userId: string | null): Promise<void> {
   if (userId === null) {
     await db.query("select set_config('request.jwt.claim.sub', '', false)");
     return;
@@ -90,7 +105,7 @@ export async function setCurrentTestUser(db: PGlite, userId: string | null): Pro
 
 /** Runs as the real `authenticated` Postgres role (so GRANT/REVOKE and RLS both apply), impersonating the given user id. Mirrors the role PostgREST connects as for a signed-in request. */
 export async function asAuthenticatedUser<T>(
-  db: PGlite,
+  db: SqlExecutor,
   userId: string,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -105,7 +120,7 @@ export async function asAuthenticatedUser<T>(
 }
 
 /** Runs as the real `service_role` Postgres role (bypasses RLS entirely, same as the worker/trusted server routes), the way production code must additionally filter by organization_id itself. */
-export async function asServiceRole<T>(db: PGlite, fn: () => Promise<T>): Promise<T> {
+export async function asServiceRole<T>(db: SqlExecutor, fn: () => Promise<T>): Promise<T> {
   await db.query("set role service_role");
   try {
     return await fn();
@@ -115,7 +130,7 @@ export async function asServiceRole<T>(db: PGlite, fn: () => Promise<T>): Promis
 }
 
 /** Runs as the real `anon` Postgres role, for proving anonymous access is denied where it must be. */
-export async function asAnon<T>(db: PGlite, fn: () => Promise<T>): Promise<T> {
+export async function asAnon<T>(db: SqlExecutor, fn: () => Promise<T>): Promise<T> {
   await db.query("set role anon");
   try {
     return await fn();

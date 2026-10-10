@@ -288,6 +288,27 @@ describe("cross-org integrity triggers, tested directly (bypassing RLS via servi
     ).rejects.toThrow();
   });
 
+  it("rejects a finding whose ssl_check belongs to a different organization", async () => {
+    const sslCheckB = await asServiceRole(db, async () => {
+      const result = await db.query<{ id: string }>(
+        `insert into public.ssl_checks (monitor_id, website_id, organization_id, checked_at, status)
+         values ($1, $2, $3, now(), 'valid') returning id`,
+        [fixtureB.monitorId, fixtureB.websiteId, orgB.orgId],
+      );
+      return result.rows[0]!.id;
+    });
+
+    await expect(
+      asServiceRole(db, () =>
+        db.query(
+          `insert into public.findings (organization_id, website_id, ssl_check_id, type, severity, title, description)
+           values ($1, $2, $3, 'ssl_expiring_30d', 'low', 'title', 'description')`,
+          [orgA.orgId, fixtureA.websiteId, sslCheckB],
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
   it("rejects a report_delivery whose report belongs to a different organization", async () => {
     const reportB = await asServiceRole(db, async () => {
       const result = await db.query<{ id: string }>(

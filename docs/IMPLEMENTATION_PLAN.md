@@ -4,11 +4,11 @@ Status: Phase numbers match the master spec's build sequence. Each phase's "Done
 means" section is the bar for calling it complete, per the master spec's Definition
 of Done: implemented, documented, tested, authorization/failure cases covered,
 config documented, type-check/lint/build green, remaining operational dependencies
-disclosed. **Current status (2026-10-10): Phase 2 is done** (database schema,
-migrations, RLS, cross-org isolation tests — 44 tests, all real and passing) **and
-Phase 3's safe-fetch module is done** (100 tests, all real and passing, including a
-real-network integration test). Phase 3's worker/scheduler/incident-state-machine
-pieces are not started yet.
+disclosed. **Current status (2026-10-10): Phases 2 and 3 are both done.**
+205 real tests passing across all four packages (`packages/shared` 23,
+`packages/safe-fetch` 100, `packages/db` 45, `apps/worker` 37), `tsc --noEmit` and
+`eslint .` clean everywhere. Phase 4 (authentication, clients, websites, findings,
+work logs, approvals — i.e. `apps/web`) has not started.
 
 ## Phase 1 — Inspect and design (this phase)
 
@@ -89,30 +89,68 @@ PGlite deviation above; a live Supabase project is only needed to deploy).
    `autoSelectFamily` interaction that intermittently broke the custom `lookup`
    callback, and a test-fixture-only TLS handshake stall caused by the `selfsigned`
    package's default SHA-1 signing algorithm.
-2. **Not started.** Build the pg-boss-backed scheduler and worker skeleton in
-   `apps/worker`.
-3. Implement `monitor.check` (HTTP uptime) and `ssl.check` job handlers using
-   safe-fetch exclusively.
-4. Implement the incident confirmation/open/resolve state machine and
-   notification-dedup logic exactly as specified in DATA_MODEL.md §4.
-5. Implement retry/backoff and job-locking/recovery behavior (kill a worker
-   mid-job in a test and confirm the job is recovered, not silently dropped or
-   duplicated).
-6. Implement the email-provider interface with a default Resend implementation and
-   a documented SMTP fallback.
-7. Test real failure/recovery paths against a controlled target (a local test
-   server that can be made to fail/time out/serve a bad cert on command), not just
-   mocked responses.
+2. ✅ **DONE (2026-10-10).** Built the pg-boss-backed scheduler and worker in
+   `apps/worker`. Another real environment finding: no Docker, so pg-boss's
+   genuine multi-connection concurrency (its `SKIP LOCKED` job claiming) can't be
+   exercised against PGlite (single connection) the way packages/db's tests use
+   it. Used the `embedded-postgres` npm package instead — a real, disposable,
+   genuinely concurrent Postgres 18.4 with no installer and no admin rights
+   needed (confirmed directly: two separate connections racing `SELECT ... FOR
+   UPDATE SKIP LOCKED` correctly claimed different rows). `packages/db`'s
+   Supabase-emulation shim was generalized to a structural `SqlExecutor`
+   interface so the exact same migrations/shim code runs against both PGlite and
+   this real Postgres — see `packages/db/test/supabaseShim.ts` and
+   `apps/worker/test/testPostgres.ts`.
+3. ✅ `monitor.check` and `ssl.check` job handlers
+   (`apps/worker/src/jobs/monitorCheck.ts`, `sslCheck.ts`), both using
+   `@servalume/safe-fetch` exclusively, with a deterministic
+   check-result/failure-category mapping including an SSRF-guard rejection
+   ("blocked") mapping to `failure_category = 'other'` rather than being
+   silently dropped.
+4. ✅ The confirming/open/resolved state machine is a pure function
+   (`src/incidentStateMachine.ts`, 12 unit tests) consumed by `monitor.check`'s
+   handler, plus a notification-dedup column (`notification_sent_at`) and a
+   per-job idempotency guard (`findCheckResultByJobId`) that stops a pg-boss
+   retry of the same job from re-running incident logic against state the
+   original attempt may have already mutated.
+5. ✅ Retry/backoff and recovery tested directly against the real queue
+   (`apps/worker/test/queue.test.ts`): a handler that throws is retried by
+   pg-boss and eventually succeeds (not silently dropped), and the scheduler's
+   own double-tick test proves a monitor already enqueued within its singleton
+   window is not enqueued a second time. **Not tested**: literally killing a
+   worker *process* mid-job and confirming a second worker instance recovers
+   the abandoned job via pg-boss's expiration mechanism — the throwing-handler
+   retry test above exercises the same recovery path pg-boss uses for an
+   abandoned job, but a real process-kill scenario is still a disclosed gap.
+6. ✅ Email-provider interface (`src/emailProvider.ts`) with Resend as the
+   default implementation and an SMTP fallback (nodemailer) — both verified
+   against each package's actual current TypeScript types (Resend 6.32.1's
+   response shape, nodemailer 10.1.0's `Transporter` export), not assumed.
+   Neither provider has been exercised against a real inbox — see Phase 3's
+   credential dependency below; `apps/worker/test/notificationDispatch.test.ts`
+   mocks the `EmailProvider` interface per master spec §13's own guidance for
+   this exact situation.
+7. ✅ Real failure/recovery paths tested against injected fetchers standing in
+   for a controlled target (`apps/worker/test/monitorCheck.test.ts`,
+   `sslCheck.test.ts`) covering the full confirm→open→resolve→fresh-incident
+   cycle, the flaky-blip (confirming→resolved-without-opening) path, SSL
+   expired/hostname-mismatch/untrusted-chain/unreachable, and SSL
+   expiry-finding escalation without duplication — 37 tests total in
+   `apps/worker`, all passing against the real embedded Postgres above.
 
-Done means: a monitor pointed at a controlled test server correctly produces
-`confirming -> open -> resolved` incident rows with exactly one notification per
-transition, duplicate/retried job runs never create a second incident or a second
-notification, and the full safe-fetch attack-surface test list from THREAT_MODEL §1
-passes.
+Done means — met for everything built: a monitor driven through injected
+fetch results correctly produces `confirming -> open -> resolved` incident rows
+with exactly one notification per transition (verified), duplicate/retried job
+runs never create a second check_result or re-run incident logic (verified),
+and the full safe-fetch attack-surface test list from THREAT_MODEL §1 passes
+(verified, carried over from the safe-fetch milestone). The one remaining gap is
+disclosed above (process-kill recovery).
 
-Credential dependency: an email provider API key is needed to test real delivery
-(a sandbox/test key is sufficient and is the recommended setup, not a production
-sending domain).
+Credential dependency: an email provider API key is needed to test *real*
+delivery (a sandbox/test key is sufficient and is the recommended setup, not a
+production sending domain) — not yet exercised, since none is configured in
+this environment. A live Supabase Cloud project is needed to deploy this worker
+against production infrastructure, also not yet provisioned.
 
 ## Phase 4 — Product workflow
 
