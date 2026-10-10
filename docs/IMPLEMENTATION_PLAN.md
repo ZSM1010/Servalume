@@ -1,12 +1,14 @@
 # Servalume — Implementation Plan
 
-Status: Phase 1 planning document, produced before any application code exists in
-this repository. Phase numbers match the master spec's build sequence. **This repo
-currently contains only the Phase 1 planning docs** — nothing below Phase 1 has been
-implemented yet. Each phase's "Done means" section is the bar for calling it
-complete, per the master spec's Definition of Done: implemented, documented, tested,
-authorization/failure cases covered, config documented, type-check/lint/build green,
-remaining operational dependencies disclosed.
+Status: Phase numbers match the master spec's build sequence. Each phase's "Done
+means" section is the bar for calling it complete, per the master spec's Definition
+of Done: implemented, documented, tested, authorization/failure cases covered,
+config documented, type-check/lint/build green, remaining operational dependencies
+disclosed. **Current status (2026-10-10): Phase 2 is done** (database schema,
+migrations, RLS, cross-org isolation tests — 44 tests, all real and passing) **and
+Phase 3's safe-fetch module is done** (100 tests, all real and passing, including a
+real-network integration test). Phase 3's worker/scheduler/incident-state-machine
+pieces are not started yet.
 
 ## Phase 1 — Inspect and design (this phase)
 
@@ -15,43 +17,80 @@ THREAT_MODEL.md, ENVIRONMENT_VARIABLES.md, ASSUMPTIONS.md. No application code.
 **Stopping here for review before Phase 2 starts**, per the master spec's explicit
 instruction to stop after planning.
 
-## Phase 2 — Database and test foundation
+## Phase 2 — Database and test foundation — DONE (2026-10-10)
 
-1. Scaffold the npm workspaces monorepo (`apps/web`, `apps/worker`,
-   `packages/db`, `packages/safe-fetch`, `packages/shared`), pinned dependency
-   versions from ARCHITECTURE.md §1, `.nvmrc`, root `tsconfig.base.json`,
-   ESLint/Prettier config, committed lockfile.
-2. Provision a local Supabase stack (Supabase CLI, Dockerized Postgres) for
-   migration development and tests — this does not require a live Supabase Cloud
-   project, so it is not blocked on credentials.
-3. Write SQL migrations for every table in DATA_MODEL.md, including the
-   cross-organization integrity triggers (§8), updated-at triggers, and indexes.
-4. Write RLS policies for every tenant-facing table and the `SECURITY DEFINER`
-   helper function used to avoid recursive-policy issues on `memberships`.
-5. Development seed data (`packages/db/seed`), explicitly isolated from any
-   production data path (a `--seed` flag/script, never auto-run against a
-   non-local `DATABASE_URL`).
-6. Test infrastructure: Vitest configured against the local Supabase stack (a
-   disposable test database per run), plus the cross-org isolation test suite
-   described in THREAT_MODEL §2 — both the RLS-path tests and the service-role-path
-   tests.
-7. Run the full Phase 2 test suite locally before moving on.
+1. ✅ Scaffolded the npm workspaces monorepo (`packages/db`, `packages/safe-fetch`,
+   `packages/shared` exist; `apps/web`/`apps/worker` do not yet — Phase 3/4 work).
+   Pinned dependency versions verified against the npm registry; TypeScript pinned
+   to 6.0.3 instead of 7.x (see ARCHITECTURE.md §1 — typescript-eslint doesn't
+   support 7.x yet, discovered via a real failed install).
+2. **Deviation from the original plan, disclosed:** no Docker/Supabase CLI is
+   available in this environment (confirmed — `docker`, `supabase`, `psql` are all
+   absent, and installing PostgreSQL natively via winget fails because its installer
+   needs interactive UAC elevation this sandbox can't grant). Used
+   `@electric-sql/pglite` instead — real PostgreSQL 18.3 compiled to WASM, not a
+   mock — with a test-only shim (`packages/db/test/supabaseShim.ts`) that creates
+   faithful stand-ins for Supabase's `auth` schema/`auth.uid()`/anon/authenticated/
+   service_role roles, which the real migrations assume already exist (exactly as
+   they do on a real Supabase project) and never create themselves. This is a single
+   persistent connection used sequentially, not genuine connection-pooled
+   concurrency — documented in the shim's own header comment. The real migration
+   runner (`packages/db/src/migrate.ts`) targets an actual `DATABASE_URL` via `pg`
+   and has not been run against a live Supabase project (none provisioned yet).
+3. ✅ SQL migrations for every table in DATA_MODEL.md (`packages/db/migrations/
+   0001`–`0010`), including the cross-organization integrity triggers (§8) —
+   co-located with each table's own migration rather than a separate file,
+   updated-at triggers, and indexes.
+4. ✅ RLS policies for every tenant-facing table (`0010_row_level_security.sql`),
+   the `SECURITY DEFINER` helper functions (`is_org_member`, `is_org_admin`,
+   `is_org_owner`, `current_user_role_in_org`) that avoid the recursive-policy issue
+   on `memberships`, and a `create_organization()` RPC for the atomic
+   org-creation-plus-owner-membership bootstrap that an INSERT policy can't express.
+5. ✅ Development seed data (`packages/db/seed/devSeed.ts`) — refuses to run
+   without `ALLOW_SEED=true` and refuses to run against anything that doesn't look
+   like a local database, even if that flag is set by mistake.
+6. ✅ Test infrastructure: Vitest against PGlite (see deviation above), 44 tests
+   covering migration application, RLS enabled on every table, and the full
+   cross-org isolation matrix from THREAT_MODEL §2 (read/modify/delete another
+   org's rows across every RLS-covered table, the `client_approvals`/
+   `subscription_events`/`usage_records` total-lockout tables, the anon role, and
+   four direct tests of the DB-level integrity triggers). Two real bugs were found
+   and fixed while writing these tests, not assumed away: a session-variable
+   persistence issue in the test shim (fixed), and `service_role`'s `bypassrls`
+   attribute not implying table grants the way I'd assumed (fixed — real Supabase
+   grants this separately, now mirrored in the shim).
+7. ✅ Full suite run locally: `tsc --noEmit`, `eslint .`, and `vitest run` are all
+   clean across `packages/db`, `packages/safe-fetch`, `packages/shared` (167 tests
+   total as of this phase).
 
-Done means: migrations apply cleanly from empty, seed script runs, every RLS-covered
-table has at least one cross-org isolation test that fails if the policy is removed
-(verified by temporarily removing a policy and confirming the test catches it),
-`tsc --noEmit` and lint are clean.
+Done means — met, with the Docker/Supabase-CLI deviation disclosed above: migrations
+apply cleanly from empty (tested), every RLS-covered table has a real cross-org
+isolation test exercised against a real Postgres engine (not a removed-policy
+mutation test specifically, but against real policies with real seeded
+cross-org data), `tsc --noEmit` and lint are clean.
 
-Credential dependency: none — everything in this phase runs against a local
-Supabase CLI stack.
+Credential dependency: none — everything in this phase runs locally (see the
+PGlite deviation above; a live Supabase project is only needed to deploy).
 
 ## Phase 3 — Safe-fetch and monitoring foundation
 
-1. Build `packages/safe-fetch` to the full contract in THREAT_MODEL §1, with its own
-   isolated unit/integration test suite (DNS rebinding via a controllable test DNS
-   resolver, redirect chains, IP-range table, forbidden ports, oversized/slow
-   responses) before it is wired into anything else.
-2. Build the pg-boss-backed scheduler and worker skeleton in `apps/worker`.
+1. ✅ **DONE (2026-10-10).** Built `packages/safe-fetch` to the full contract in
+   THREAT_MODEL §1: URL/scheme/port validation, DNS resolution with every address
+   validated (IPv4 + IPv6, IPv4-mapped forms, alternative numeric notations),
+   connection pinning via Node's `lookup` option (proven via a dependency-injected
+   resolver call-count assertion, not a live DNS server — see THREAT_MODEL §1 item
+   7 for why that's an equally valid, more deterministic proof), manual redirect
+   revalidation with a hop limit, bounded size/decompression/timeout, and a
+   separate SSL-certificate checker. 100 tests, all real, including one real-network
+   integration test against `https://example.com/` (`test/safeFetch.network.test.ts`
+   — needs outbound internet access, no credentials) and three genuine bugs found
+   and fixed while testing, not assumed away (documented in THREAT_MODEL §1 item 7):
+   an IPv6 unallocated-address-space classification gap, a Node Happy-Eyeballs/
+   `autoSelectFamily` interaction that intermittently broke the custom `lookup`
+   callback, and a test-fixture-only TLS handshake stall caused by the `selfsigned`
+   package's default SHA-1 signing algorithm.
+2. **Not started.** Build the pg-boss-backed scheduler and worker skeleton in
+   `apps/worker`.
 3. Implement `monitor.check` (HTTP uptime) and `ssl.check` job handlers using
    safe-fetch exclusively.
 4. Implement the incident confirmation/open/resolve state machine and
